@@ -515,24 +515,36 @@ bool EspClass::flashWrite(uint32_t offset, uint32_t *data, size_t size) {
 	//    return rc == 0;
 	static uint32_t flash_chip_id = 0;
 
+	// spi_flash_write only handles whole 32-bit words.
+	if (size % 4 != 0)
+		return false;
+
 	if (flash_chip_id == 0)
 		flash_chip_id = getFlashChipId();
 	ets_isr_mask(FLASH_INT_MASK);
-	int rc;
-	uint32_t* ptr = data;
+	int rc = 0;
 	if ((flash_chip_id & 0x000000ff) == 0x85) { // 0x146085 PUYA
-		static uint32_t read_buf[SPI_FLASH_SEC_SIZE / 4];
-		rc = spi_flash_read(offset, read_buf, size);
-		if (rc != 0) {
-			ets_isr_unmask(FLASH_INT_MASK);
-			return false;
+		// PUYA chips don't AND new data with what is already in flash, so do it here.
+		// Work in small chunks: any write size is safe (the old 4 KB static buffer
+		// overflowed for larger writes) and no RAM is reserved on non-PUYA chips.
+		uint32_t buf[64];
+		size_t done = 0;
+		while (done < size && rc == 0) {
+			size_t chunk = size - done;
+			if (chunk > sizeof(buf))
+				chunk = sizeof(buf);
+			rc = spi_flash_read(offset + done, buf, chunk);
+			if (rc == 0) {
+				for (size_t i = 0; i < chunk / 4; ++i) {
+					buf[i] &= data[done / 4 + i];
+				}
+				rc = spi_flash_write(offset + done, buf, chunk);
+			}
+			done += chunk;
 		}
-		for (size_t i = 0; i < size / 4; ++i) {
-			read_buf[i] &= data[i];
-		}
-		ptr = read_buf;
+	} else {
+		rc = spi_flash_write(offset, data, size);
 	}
-	rc = spi_flash_write(offset, ptr, size);
 	ets_isr_unmask(FLASH_INT_MASK);
 	return rc == 0;
 }
